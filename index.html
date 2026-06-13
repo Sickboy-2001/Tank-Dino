@@ -1,0 +1,553 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Tank Dino Game</title>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+  <style>
+    body {
+      margin: 0;
+      background-color: #f1f5f9;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      font-family: monospace;
+    }
+  </style>
+</head>
+<body>
+
+  <div id="root" class="w-full max-w-2xl p-4"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef } = React;
+
+    function DinoGame() {
+      const [score, setScore] = useState(0);
+      const [highScore, setHighScore] = useState(0);
+      const [gameStarted, setGameStarted] = useState(false);
+      const [isPaused, setIsPaused] = useState(false);
+      const [isGameOver, setIsGameOver] = useState(false);
+
+      const canvasRef = useRef(null);
+      const isPausedRef = useRef(false);
+      const gameStartedRef = useRef(false);
+      const isGameOverRef = useRef(false);
+      const resetGameSignal = useRef(false);
+      const mousePosRef = useRef({ x: 0, y: 0 });
+
+      useEffect(() => {
+        isPausedRef.current = isPaused;
+        gameStartedRef.current = gameStarted;
+        isGameOverRef.current = isGameOver;
+      }, [isPaused, gameStarted, isGameOver]);
+
+      useEffect(() => {
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+
+        const sprImg = new Image();
+        sprImg.src = "sprite.png"; // Make sure sprite.png is in the same repo folder!
+
+        let animationFrameId;
+        const horizonY = 190;
+
+        let gameSpeed = 5.5;
+        let localScore = 0;
+        let frameTicker = 0;
+        let groundScrollX = 0;
+        let treadOffset = 0;
+
+        let ultraTimer = 0;
+        const ULTRA_INTERVAL = 1200; 
+        let ultraActive = false;
+        let ultraCount = 0; 
+        let ultraPtero = null;
+
+        const vehicle = {
+          x: 60, y: horizonY - 36, w: 56, h: 36, maxHp: 100, hp: 100,
+        };
+
+        let obstacles = [];
+        let spawnCooldown = 0;
+        let flyers = [];
+        let flyerSpawnCooldown = 0;
+        let bullets = [];
+        let particles = [];
+        let scorePopups = [];
+
+        function getBulletDamage() { return Math.max(8, 100 - localScore / 8); }
+        function getCactusHp() { return Math.min(1 + Math.floor(localScore / 60), 6); }
+        function getFlyerHp() { return Math.min(1 + Math.floor(localScore / 40), 8); }
+        function getUltraHp() { return Math.min(10 + Math.floor(localScore / 20), 50); }
+
+        function lineIntersectsBox(x1, y1, x2, y2, bx, by, bw, bh) {
+          const pad = 6;
+          const minX = bx - pad, maxX = bx + bw + pad, minY = by - pad, maxY = by + bh + pad;
+          if ((x1 < minX && x2 < minX) || (x1 > maxX && x2 > maxX)) return false;
+          if ((y1 < minY && y2 < minY) || (y1 > maxY && y2 > maxY)) return false;
+          if (x1 === x2) return true;
+          const m = (y2 - y1) / (x2 - x1), c = y1 - m * x1;
+          const yAtMinX = m * minX + c; if (yAtMinX >= minY && yAtMinX <= maxY) return true;
+          const yAtMaxX = m * maxX + c; if (yAtMaxX >= minY && yAtMaxX <= maxY) return true;
+          return false;
+        }
+
+        function drawHealthBar(x, y, w, hp, maxHp, thick = false) {
+          const barH = thick ? 7 : 4;
+          const pct = hp / maxHp;
+          ctx.fillStyle = '#e2e8f0'; ctx.fillRect(x, y, w, barH);
+          ctx.fillStyle = pct > 0.6 ? '#22c55e' : pct > 0.3 ? '#eab308' : '#ef4444';
+          ctx.fillRect(x, y, w * pct, barH);
+          ctx.strokeStyle = '#94a3b8'; ctx.lineWidth = 0.8; ctx.strokeRect(x, y, w, barH);
+        }
+
+        function createExplosion(x, y, color, intensity) {
+          for (let i = 0; i < intensity; i++) {
+            particles.push({ x, y, vx: (Math.random() - 0.5) * 7, vy: (Math.random() - 0.5) * 7, radius: Math.random() * 2.5 + 1, alpha: 1, color });
+          }
+        }
+
+        function update() {
+          if (resetGameSignal.current) {
+            resetGameSignal.current = false;
+            gameSpeed = 5.5; localScore = 0; frameTicker = 0; groundScrollX = 0; treadOffset = 0;
+            bullets = []; vehicle.hp = 100; obstacles = []; flyers = [];
+            particles = []; scorePopups = [];
+            ultraTimer = 0; ultraActive = false; ultraCount = 0; ultraPtero = null;
+            spawnCooldown = 0; flyerSpawnCooldown = 0;
+          }
+
+          ctx.fillStyle = "#ffffff";
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+          ctx.drawImage(sprImg, groundScrollX, 104, canvas.width, 18, 0, horizonY - 6, canvas.width, 18);
+          ctx.drawImage(sprImg, 0, 104, canvas.width, 18, canvas.width - (groundScrollX % canvas.width), horizonY - 6, canvas.width, 18);
+
+          if (gameStartedRef.current && !isPausedRef.current && !isGameOverRef.current) {
+            frameTicker++;
+            if (frameTicker % 8 === 0) { localScore++; setScore(localScore); }
+
+            treadOffset = (treadOffset - gameSpeed) % 16;
+            groundScrollX += gameSpeed;
+            if (groundScrollX >= 2404) groundScrollX = 0;
+
+            if (gameSpeed < 14) { gameSpeed = 5.5 + localScore / 600; }
+
+            ultraTimer++;
+            if (ultraTimer >= ULTRA_INTERVAL && !ultraActive) {
+              ultraActive = true;
+              ultraTimer = 0;
+              ultraCount++;
+              flyers = [];
+              if (ultraCount <= 3) obstacles = [];
+              const uhp = getUltraHp();
+              ultraPtero = {
+                x: canvas.width + 20, y: 20, w: 110, h: 90,
+                hp: uhp, maxHp: uhp, wingFrame: 0, speed: 1.2,
+                isDiving: false, diveVY: 0,
+              };
+            }
+
+            const suppressCactus = ultraActive && ultraCount <= 3;
+
+            if (!suppressCactus) {
+              spawnCooldown++;
+              if (spawnCooldown > Math.random() * 30 + 75) {
+                const isLargeCactus = Math.random() > 0.4;
+                const chp = getCactusHp();
+                if (isLargeCactus) {
+                  obstacles.push({ x: canvas.width, y: horizonY - 46, srcX: 652, srcY: 2, w: 23, h: 46, hp: chp, maxHp: chp, isHit: false });
+                } else {
+                  obstacles.push({ x: canvas.width, y: horizonY - 33, srcX: 446, srcY: 2, w: 16, h: 33, hp: chp, maxHp: chp, isHit: false });
+                }
+                spawnCooldown = 0;
+              }
+            }
+
+            if (!ultraActive) {
+              flyerSpawnCooldown++;
+              if (flyerSpawnCooldown > Math.random() * 100 + 150) {
+                const randomHeight = Math.random() * 60 + 30;
+                const fhp = getFlyerHp();
+                flyers.push({
+                  x: canvas.width, y: randomHeight, w: 46, h: 40,
+                  wingFrame: 0, speed: gameSpeed * 0.25 + 1.2,
+                  hp: fhp, maxHp: fhp, isHit: false,
+                  isDiving: false, diveVY: 0,
+                  willHit: Math.random() < 0.5,
+                });
+                flyerSpawnCooldown = 0;
+              }
+            }
+
+            flyers.forEach(flyer => {
+              flyer.x -= flyer.speed;
+              if (frameTicker % 15 === 0) flyer.wingFrame = flyer.wingFrame === 0 ? 1 : 0;
+
+              if (!flyer.isDiving && flyer.x < vehicle.x + vehicle.w + 120 && flyer.x > vehicle.x - 30) {
+                flyer.isDiving = true;
+                flyer.diveVY = 1.4 + Math.random() * 0.8;
+              }
+
+              if (flyer.isDiving) {
+                const diveFloor = flyer.willHit ? vehicle.y + vehicle.h / 2 : vehicle.y - flyer.h - 8;
+                if (flyer.y < diveFloor) {
+                  flyer.y = Math.min(flyer.y + flyer.diveVY, diveFloor);
+                } else {
+                  flyer.y -= 1.2;
+                  if (flyer.y < 20) { flyer.isDiving = false; flyer.diveVY = 0; }
+                }
+              }
+
+              if (flyer.y + flyer.h >= vehicle.y && flyer.x + flyer.w >= vehicle.x && flyer.x <= vehicle.x + vehicle.w) {
+                flyer.isHit = true;
+                vehicle.hp -= 20;
+                createExplosion(vehicle.x + vehicle.w / 2, vehicle.y, "#fbbf24", 12);
+                if (vehicle.hp <= 0) {
+                  vehicle.hp = 0; setIsGameOver(true);
+                  createExplosion(vehicle.x + vehicle.w / 2, vehicle.y + vehicle.h / 2, "#efab00", 25);
+                }
+              }
+            });
+
+            if (ultraPtero) {
+              ultraPtero.x -= ultraPtero.speed;
+              if (frameTicker % 20 === 0) ultraPtero.wingFrame = ultraPtero.wingFrame === 0 ? 1 : 0;
+
+              if (!ultraPtero.isDiving && ultraPtero.x < vehicle.x + vehicle.w + 200 && ultraPtero.x > vehicle.x - 60) {
+                ultraPtero.isDiving = true;
+                ultraPtero.diveVY = 1.4;
+              }
+
+              if (ultraPtero.isDiving) {
+                // FIXED MECHANIC: Prevents diving below the ground
+                const diveFloor = (vehicle.y + vehicle.h) - ultraPtero.h;
+                if (ultraPtero.y < diveFloor) {
+                  ultraPtero.y = Math.min(ultraPtero.y + ultraPtero.diveVY, diveFloor);
+                } else {
+                  ultraPtero.y -= 0.8;
+                  if (ultraPtero.y < 20) { ultraPtero.isDiving = false; ultraPtero.diveVY = 0; }
+                }
+              }
+
+              if (ultraPtero.y + ultraPtero.h >= vehicle.y && ultraPtero.x + ultraPtero.w >= vehicle.x && ultraPtero.x <= vehicle.x + vehicle.w) {
+                vehicle.hp -= 40;
+                createExplosion(vehicle.x + vehicle.w / 2, vehicle.y, "#dc2626", 20);
+                ultraPtero = null; ultraActive = false;
+                if (vehicle.hp <= 0) {
+                  vehicle.hp = 0; setIsGameOver(true);
+                  createExplosion(vehicle.x + vehicle.w / 2, vehicle.y + vehicle.h / 2, "#efab00", 30);
+                }
+              }
+
+              if (ultraPtero && ultraPtero.x + ultraPtero.w < -10) { ultraPtero = null; ultraActive = false; }
+            }
+
+            obstacles.forEach(obs => {
+              obs.x -= gameSpeed;
+              if (obs.x <= vehicle.x + vehicle.w && obs.x + obs.w >= vehicle.x) {
+                vehicle.hp -= 20; obs.isHit = true;
+                createExplosion(obs.x, obs.y + obs.h / 2, "#ef4444", 14);
+                if (vehicle.hp <= 0) {
+                  vehicle.hp = 0; setIsGameOver(true);
+                  createExplosion(vehicle.x + vehicle.w / 2, vehicle.y + vehicle.h / 2, "#efab00", 25);
+                }
+              }
+            });
+
+            obstacles = obstacles.filter(obs => obs.x + obs.w > -10 && !obs.isHit);
+            flyers = flyers.filter(f => f.x + f.w > -10 && !f.isHit);
+
+            const dmg = getBulletDamage();
+            bullets = bullets.filter(bullet => {
+              bullet.lastX = bullet.currentX; bullet.lastY = bullet.currentY;
+              bullet.progress += bullet.speed;
+              bullet.currentX = bullet.startX + (bullet.targetX - bullet.startX) * bullet.progress;
+              bullet.currentY = bullet.startY + (bullet.targetY - bullet.startY) * bullet.progress;
+
+              if (ultraPtero) {
+                const hit = lineIntersectsBox(bullet.lastX, bullet.lastY, bullet.currentX, bullet.currentY, ultraPtero.x, ultraPtero.y, ultraPtero.w, ultraPtero.h);
+                if (hit) {
+                  ultraPtero.hp -= dmg;
+                  createExplosion(ultraPtero.x + ultraPtero.w / 2, ultraPtero.y + ultraPtero.h / 2, "#dc2626", 10);
+                  if (ultraPtero.hp <= 0) {
+                    scorePopups.push({ x: ultraPtero.x + ultraPtero.w / 2, y: ultraPtero.y - 10, text: "+2000!", alpha: 1.0, life: 60 });
+                    localScore += 2000; setScore(localScore);
+                    createExplosion(ultraPtero.x + ultraPtero.w / 2, ultraPtero.y + ultraPtero.h / 2, "#f97316", 40);
+                    ultraPtero = null; ultraActive = false;
+                  }
+                  return false;
+                }
+              }
+
+              for (let obs of obstacles) {
+                const hit = lineIntersectsBox(bullet.lastX, bullet.lastY, bullet.currentX, bullet.currentY, obs.x, obs.y, obs.w, obs.h);
+                if (hit) {
+                  obs.hp -= dmg; createExplosion(obs.x + obs.w / 2, obs.y + obs.h / 2, "#16a34a", 8);
+                  if (obs.hp <= 0) { obs.isHit = true; localScore += 40; setScore(localScore); }
+                  return false;
+                }
+              }
+
+              for (let flyer of flyers) {
+                if (!flyer.isHit) {
+                  const hit = lineIntersectsBox(bullet.lastX, bullet.lastY, bullet.currentX, bullet.currentY, flyer.x, flyer.y, flyer.w, flyer.h);
+                  if (hit) {
+                    flyer.hp -= dmg; createExplosion(flyer.x + flyer.w / 2, flyer.y + flyer.h / 2, "#fbbf24", 10);
+                    if (flyer.hp <= 0) {
+                      flyer.isHit = true;
+                      scorePopups.push({ x: flyer.x + flyer.w / 2, y: flyer.y, text: "+500", alpha: 1.0, life: 35 });
+                      localScore += 500; setScore(localScore);
+                    }
+                    return false;
+                  }
+                }
+              }
+
+              if (bullet.progress >= 1) { createExplosion(bullet.currentX, bullet.currentY, "#a1a1aa", 4); return false; }
+              return true;
+            });
+
+            scorePopups.forEach((pop, index) => {
+              pop.y -= 0.8; pop.life--;
+              pop.alpha = pop.life / 35;
+              if (pop.life <= 0) scorePopups.splice(index, 1);
+            });
+          }
+
+          // --- RENDER ---
+          obstacles.forEach(obs => {
+            if (!obs.isHit) {
+              ctx.drawImage(sprImg, obs.srcX, obs.srcY, obs.w * 2, obs.h * 2, obs.x, obs.y, obs.w, obs.h);
+              if (obs.maxHp > 1) drawHealthBar(obs.x, obs.y - 8, obs.w, obs.hp, obs.maxHp);
+            }
+          });
+
+          flyers.forEach(flyer => {
+            if (!flyer.isHit) {
+              const sprOff = flyer.wingFrame === 0 ? 0 : 80;
+              ctx.drawImage(sprImg, 260, 2 + sprOff, 92, 80, flyer.x, flyer.y, flyer.w, flyer.h);
+              if (flyer.maxHp > 1) drawHealthBar(flyer.x, flyer.y - 8, flyer.w, flyer.hp, flyer.maxHp);
+              if (flyer.isDiving) {
+                ctx.save(); ctx.globalAlpha = 0.7; ctx.fillStyle = '#dc2626';
+                ctx.font = 'bold 8px monospace'; ctx.textAlign = 'center';
+                ctx.fillText('▼ DIVE', flyer.x + flyer.w / 2, flyer.y - 11);
+                ctx.restore();
+              }
+            }
+          });
+
+          if (ultraPtero) {
+            const sprOff = ultraPtero.wingFrame === 0 ? 0 : 80;
+            ctx.save();
+            ctx.shadowColor = '#dc2626'; ctx.shadowBlur = 18;
+            ctx.drawImage(sprImg, 260, 2 + sprOff, 92, 80, ultraPtero.x, ultraPtero.y, ultraPtero.w, ultraPtero.h);
+            ctx.restore();
+            drawHealthBar(ultraPtero.x, ultraPtero.y - 11, ultraPtero.w, ultraPtero.hp, ultraPtero.maxHp, true);
+            if (ultraPtero.isDiving) {
+              ctx.save(); ctx.globalAlpha = 0.85; ctx.fillStyle = '#dc2626';
+              ctx.font = 'bold 10px monospace'; ctx.textAlign = 'center';
+              ctx.fillText('▼▼ DIVE ▼▼', ultraPtero.x + ultraPtero.w / 2, ultraPtero.y - 14);
+              ctx.restore();
+            }
+          }
+
+          if (vehicle.hp > 0) {
+            ctx.save();
+            const idleVibe = (gameStartedRef.current && !isPausedRef.current && !isGameOverRef.current) ? Math.sin(frameTicker * 0.4) * 0.6 : 0;
+            const tankX = vehicle.x, tankY = vehicle.y + idleVibe;
+
+            ctx.drawImage(sprImg, 1338, 0, 88, 94, tankX + 5, tankY - 34, 32, 36);
+
+            const pivotX = tankX + 38, pivotY = tankY + 6;
+            const targetAngle = Math.atan2(mousePosRef.current.y - pivotY, mousePosRef.current.x - pivotX);
+            ctx.save(); ctx.translate(pivotX, pivotY); ctx.rotate(targetAngle);
+            ctx.fillStyle = "#334155"; ctx.strokeStyle = "#0f172a"; ctx.lineWidth = 1.5;
+            ctx.fillRect(0, -4, 32, 8); ctx.strokeRect(0, -4, 32, 8);
+            ctx.fillStyle = "#1e293b"; ctx.fillRect(28, -6, 5, 12);
+            ctx.restore();
+
+            ctx.fillStyle = "#475569"; ctx.strokeStyle = "#1e293b"; ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(tankX + 4, tankY + 12); ctx.lineTo(tankX + 10, tankY + 2);
+            ctx.lineTo(tankX + 46, tankY + 2); ctx.lineTo(tankX + 54, tankY + 12);
+            ctx.lineTo(tankX + 52, tankY + 24); ctx.lineTo(tankX + 2, tankY + 24);
+            ctx.closePath(); ctx.fill(); ctx.stroke();
+
+            ctx.fillStyle = "#334155"; ctx.beginPath();
+            ctx.arc(pivotX, pivotY, 11, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+
+            ctx.fillStyle = "#1e293b"; ctx.strokeStyle = "#1e293b"; ctx.lineWidth = 2;
+            ctx.beginPath();
+            if (ctx.roundRect) ctx.roundRect(tankX, tankY + 24, vehicle.w, 11, 5.5);
+            else ctx.rect(tankX, tankY + 24, vehicle.w, 11);
+            ctx.fill(); ctx.stroke();
+
+            ctx.strokeStyle = "#64748b"; ctx.lineWidth = 1.5; ctx.save();
+            ctx.beginPath();
+            if (ctx.roundRect) ctx.roundRect(tankX, tankY + 24, vehicle.w, 11, 5.5);
+            else ctx.rect(tankX, tankY + 24, vehicle.w, 11);
+            ctx.clip();
+            for (let tX = tankX + treadOffset; tX < tankX + vehicle.w + 20; tX += 10) {
+              ctx.beginPath(); ctx.moveTo(tX, tankY + 24); ctx.lineTo(tX - 4, tankY + 35); ctx.stroke();
+            }
+            ctx.restore();
+
+            ctx.fillStyle = "#94a3b8";
+            for (let rX = tankX + 13; rX < tankX + 46; rX += 14) {
+              ctx.beginPath(); ctx.arc(rX, tankY + 16, 2, 0, Math.PI * 2); ctx.fill();
+            }
+
+            const barW = 44, barH = 5, barX = tankX + (vehicle.w - barW) / 2, barY = tankY - 44;
+            ctx.fillStyle = '#e2e8f0'; ctx.fillRect(barX, barY, barW, barH);
+            const hpPct = vehicle.hp / vehicle.maxHp;
+            ctx.fillStyle = hpPct > 0.5 ? '#22c55e' : hpPct > 0.25 ? '#eab308' : '#ef4444';
+            ctx.fillRect(barX, barY, barW * hpPct, barH);
+            ctx.restore();
+          }
+
+          bullets.forEach(b => {
+            ctx.fillStyle = '#06b6d4'; ctx.beginPath();
+            ctx.arc(b.currentX, b.currentY, 4, 0, Math.PI * 2); ctx.fill();
+          });
+
+          particles.forEach((p, idx) => {
+            if (!isPausedRef.current && !isGameOverRef.current) { p.x += p.vx; p.y += p.vy; p.alpha -= 0.025; }
+            if (p.alpha <= 0) { particles.splice(idx, 1); } else {
+              ctx.save(); ctx.globalAlpha = p.alpha; ctx.fillStyle = p.color;
+              ctx.beginPath(); ctx.arc(p.x, p.y, p.radius, 0, Math.PI * 2); ctx.fill(); ctx.restore();
+            }
+          });
+
+          scorePopups.forEach(pop => {
+            ctx.save(); ctx.globalAlpha = pop.alpha;
+            ctx.fillStyle = pop.text.includes('2000') ? "#f97316" : "#22c55e";
+            ctx.font = "bold 13px monospace"; ctx.textAlign = "center";
+            ctx.fillText(pop.text, pop.x, pop.y); ctx.restore();
+          });
+
+          animationFrameId = requestAnimationFrame(update);
+        }
+
+        const handleCanvasClick = (e) => {
+          if (!gameStartedRef.current || isPausedRef.current || isGameOverRef.current) return;
+          const rect = canvas.getBoundingClientRect();
+          const clickX = e.clientX - rect.left, clickY = e.clientY - rect.top;
+          const firePivotX = vehicle.x + 38, firePivotY = vehicle.y + 6;
+          bullets.push({
+            startX: firePivotX, startY: firePivotY, currentX: firePivotX, currentY: firePivotY,
+            lastX: firePivotX, lastY: firePivotY, targetX: clickX, targetY: clickY,
+            speed: 0.03, progress: 0,
+          });
+        };
+
+        const handleMouseMove = (e) => {
+          const rect = canvas.getBoundingClientRect();
+          mousePosRef.current = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+        };
+
+        canvas.addEventListener('mousedown', handleCanvasClick);
+        canvas.addEventListener('mousemove', handleMouseMove);
+        update();
+
+        return () => {
+          cancelAnimationFrame(animationFrameId);
+          canvas.removeEventListener('mousedown', handleCanvasClick);
+          canvas.removeEventListener('mousemove', handleMouseMove);
+        };
+      }, [gameStarted]);
+
+      const startGame = () => {
+        resetGameSignal.current = true;
+        setGameStarted(true); setIsPaused(false); setIsGameOver(false); setScore(0);
+      };
+
+      const handleRestart = () => {
+        if (score > highScore) setHighScore(score);
+        resetGameSignal.current = true;
+        setIsGameOver(false); setIsPaused(false); setScore(0);
+      };
+
+      const togglePause = () => { if (!isGameOver) setIsPaused(p => !p); };
+
+      return (
+        <div class="rounded-xl overflow-hidden shadow-lg border border-slate-200 bg-white w-full">
+          <div class="flex items-center justify-between px-3 py-2 bg-slate-50 border-b border-slate-100">
+            <span class="font-mono text-xs text-slate-500">
+              <span class="text-slate-400 mr-2">HI {highScore}</span>
+              <span class="font-bold text-cyan-600">{score}</span>
+            </span>
+            <div class="flex items-center gap-2">
+              {gameStarted && !isGameOver && (
+                <button
+                  onClick={togglePause}
+                  class="text-slate-400 hover:text-slate-600 text-sm w-6 h-6 flex items-center justify-center rounded transition-colors cursor-pointer"
+                  title={isPaused ? 'Resume' : 'Pause'}
+                >
+                  {isPaused ? '▶' : '⏸'}
+                </button>
+              )}
+            </div>
+          </div>
+
+          <div class="relative bg-white flex items-center justify-center h-[220px]">
+            <canvas
+              ref={canvasRef}
+              width={600}
+              height={220}
+              class={`w-full h-full block bg-white transition-opacity duration-300
+                ${!gameStarted || isGameOver ? 'opacity-40' : 'opacity-100'}
+                ${gameStarted && !isPaused && !isGameOver ? 'cursor-crosshair' : 'cursor-default'}`}
+            />
+
+            {!gameStarted && (
+              <div class="absolute inset-0 flex items-center justify-center">
+                <button
+                  onClick={startGame}
+                  class="px-5 py-2.5 bg-slate-800 hover:bg-slate-900 text-white font-medium text-sm rounded-lg shadow-md transition transform active:scale-95 cursor-pointer"
+                >
+                  Play
+                </button>
+              </div>
+            )}
+
+            {gameStarted && isGameOver && (
+              <div class="absolute inset-0 flex flex-col items-center justify-center bg-slate-900/50 backdrop-blur-[1px]">
+                <span class="text-xl font-black text-white uppercase tracking-widest mb-1">Game over</span>
+                <p class="text-xs text-slate-300 mb-4 font-mono">{score} pts</p>
+                <button
+                  onClick={handleRestart}
+                  class="px-4 py-2 bg-amber-500 hover:bg-amber-600 text-slate-900 font-bold text-xs rounded-lg shadow-md transition transform active:scale-95 cursor-pointer"
+                >
+                  Play again
+                </button>
+              </div>
+            )}
+
+            {gameStarted && isPaused && !isGameOver && (
+              <div class="absolute inset-0 flex flex-col items-center justify-center bg-white/70 backdrop-blur-[0.5px]">
+                <button
+                  onClick={togglePause}
+                  class="px-5 py-2.5 bg-slate-700 hover:bg-slate-800 text-white font-medium text-sm rounded-lg shadow transition active:scale-95 cursor-pointer"
+                >
+                  ▶ Resume
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<DinoGame />);
+  </script>
+</body>
+</html>
